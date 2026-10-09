@@ -11,6 +11,18 @@ This module intercepts the `Hyva\Theme\ViewModel\SvgIcons::renderHtml` method. I
 2. Returns a light `<svg><use href="#icon-id" /></svg>` tag.
 3. Renders all collected icons as `<symbol>` elements within a hidden `<svg>` sprite at the bottom of the page (before the `</body>` tag).
 
+### Cached blocks
+
+Blocks loaded from the `block_html` cache (e.g. Hyva product list items, catalog product widgets) never call
+`renderHtml`, so their icons can't register themselves in the sprite. To cover this:
+
+- every symbol added to the sprite is also stored in a persistent registry (`HYVA_SVG_SPRITE_REGISTRY`,
+  kept in the `block_html` cache type, so it is flushed together with the cached blocks);
+- the `view_block_abstract_to_html_after` observer (`Observer\CollectCachedIcons`) scans each block's output
+  (cache hits included) for `<use href="#icon-...">` and adds the missing symbols from the registry.
+
+Only blocks rendered before the sprite block (`before.body.end`) are covered.
+
 ## Features
 
 - **Performance Optimization**: Reduces the overall size of the HTML document by reusing SVG definitions.

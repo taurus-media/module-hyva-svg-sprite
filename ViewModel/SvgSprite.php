@@ -7,14 +7,66 @@ declare(strict_types=1);
 
 namespace Taurus\HyvaSvgSprite\ViewModel;
 
+use Magento\Framework\App\Cache\Type\Block as BlockCache;
+use Magento\Framework\Serialize\Serializer\Json;
 use Magento\Framework\View\Element\Block\ArgumentInterface;
+use Psr\Log\LoggerInterface;
 
 class SvgSprite implements ArgumentInterface
 {
     /**
+     * Cache id of the persistent "icon id => <symbol>" registry.
+     *
+     * Blocks loaded from the block_html cache never call SvgIcons::renderHtml(), so their icons
+     * can't register themselves. The registry lets us restore those symbols by id.
+     * It lives in the block_html cache type, so it is flushed together with the cached blocks.
+     */
+    private const REGISTRY_CACHE_ID = 'HYVA_SVG_SPRITE_REGISTRY';
+
+    /**
      * @var array
      */
     private array $icons = [];
+
+    /**
+     * @var array|null
+     */
+    private ?array $registry = null;
+
+    /**
+     * @var array
+     */
+    private array $newRegistryIcons = [];
+
+    /**
+     * @var BlockCache
+     */
+    private BlockCache $cache;
+
+    /**
+     * @var Json
+     */
+    private Json $serializer;
+
+    /**
+     * @var LoggerInterface
+     */
+    private LoggerInterface $logger;
+
+    /**
+     * @param BlockCache $cache
+     * @param Json $serializer
+     * @param LoggerInterface $logger
+     */
+    public function __construct(
+        BlockCache $cache,
+        Json $serializer,
+        LoggerInterface $logger
+    ) {
+        $this->cache = $cache;
+        $this->serializer = $serializer;
+        $this->logger = $logger;
+    }
 
     /**
      * Add a new icon to the sprite
@@ -27,6 +79,31 @@ class SvgSprite implements ArgumentInterface
     {
         if (!isset($this->icons[$id])) {
             $this->icons[$id] = $this->prepareSvgForSprite($content, $id);
+
+            $registry = $this->getRegistry();
+            if (($registry[$id] ?? null) !== $this->icons[$id]) {
+                $this->newRegistryIcons[$id] = $this->icons[$id];
+            }
+        }
+    }
+
+    /**
+     * Add an icon referenced by already rendered (e.g. cached) HTML
+     *
+     * @param string $id
+     * @return void
+     */
+    public function addIconById(string $id): void
+    {
+        if (isset($this->icons[$id])) {
+            return;
+        }
+
+        $registry = $this->getRegistry();
+        if (isset($registry[$id])) {
+            $this->icons[$id] = $registry[$id];
+        } else {
+            $this->logger->debug(sprintf('Taurus_HyvaSvgSprite: no symbol found for "%s"', $id));
         }
     }
 
@@ -35,6 +112,8 @@ class SvgSprite implements ArgumentInterface
      */
     public function getSpriteHtml(): string
     {
+        $this->saveRegistry();
+
         if (empty($this->icons)) {
             return '';
         }
@@ -46,6 +125,52 @@ class SvgSprite implements ArgumentInterface
         $sprite .= '</svg>';
 
         return $sprite;
+    }
+
+    /**
+     * @return array
+     */
+    private function getRegistry(): array
+    {
+        if ($this->registry === null) {
+            $this->registry = $this->loadRegistry();
+        }
+
+        return $this->registry;
+    }
+
+    /**
+     * @return array
+     */
+    private function loadRegistry(): array
+    {
+        $data = $this->cache->load(self::REGISTRY_CACHE_ID);
+        if (!$data) {
+            return [];
+        }
+
+        try {
+            $registry = $this->serializer->unserialize($data);
+        } catch (\InvalidArgumentException $e) {
+            return [];
+        }
+
+        return is_array($registry) ? $registry : [];
+    }
+
+    /**
+     * @return void
+     */
+    private function saveRegistry(): void
+    {
+        if (empty($this->newRegistryIcons)) {
+            return;
+        }
+
+        // Re-read to merge icons saved by concurrent requests
+        $this->registry = array_merge($this->loadRegistry(), $this->newRegistryIcons);
+        $this->cache->save($this->serializer->serialize($this->registry), self::REGISTRY_CACHE_ID);
+        $this->newRegistryIcons = [];
     }
 
     /**
